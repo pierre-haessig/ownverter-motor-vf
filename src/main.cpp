@@ -61,8 +61,10 @@ static const uint32_t T_control_micro = (uint32_t)(T_control * 1.e6F); // Contro
 static float32_t v_freq = 10.0; // inverter voltage frequency (Hz)
 static float32_t v_angle = 0.0; // inverter voltage angle (rad)
 const float32_t FREQ_INCREMENT = 10.0; // frequency up or down increment (Hz)
-float32_t Vi_ref = 0.0; // Inverter voltage reference (V)
-const float32_t VI_STEP = 0.5; // Inverter voltage increment/decrement step (V)
+const float32_t KEMF = 0.040184; // Motor emf constant (V/Hz), expressed as phase-to-neutral amplitude
+float32_t Vi_ref_delta = 1.0; // Inverter voltage reference supplement (added to V/f control) (V)
+float32_t Vi_ref = KEMF*v_freq + Vi_ref_delta; // Inverter voltage amplitude reference (V)
+const float32_t VI_STEP = 0.1; // Inverter voltage increment/decrement step (V)
 
 /* BOARD POWER CONVERSION STATE VARIABLES */
 static bool power_enable = false; // Power conversion state of the leg (PWM activation state)
@@ -98,6 +100,10 @@ static float meas_data; // Temporary storage for measured value
 static LowPassFirstOrderFilter vdc_filter = controlLibFactory.lowpassfilter(T_control, 5.0e-3F);
 static float32_t V_dc_filt; // DC bus voltage, lowpass filtered (V)
 static float32_t inv_V_dc_filt; // 1/Vdc, with a 1/V_DC_MIN bound
+
+// Frequency smoothing filter
+static LowPassFirstOrderFilter freq_filter = controlLibFactory.lowpassfilter(T_control, 0.10F);
+static float32_t v_freq_smooth = v_freq; // inverter voltage frequency, smoothed (low pass) (Hz)
 
 
 /* -------------- SETUP FUNCTION -------------------------------*/
@@ -154,8 +160,8 @@ void user_interface_task()
 				"|     ------- MENU ---------                   |\n"
 				"|     press i   : idle mode                    |\n"
 				"|     press p   : power mode                   |\n"
-				"|     press u   : voltage amplitude UP         |\n"
-				"|     press j   : voltage amplitude DOWN       |\n"
+				"|     press u   : voltage amplitude delta UP   |\n"
+				"|     press j   : voltage amplitude delta DOWN |\n"
 				"|     press f   : frequency UP                 |\n"
 				"|     press v   : frequency DOWN               |\n"
 				"|______________________________________________|\n\n");
@@ -171,12 +177,12 @@ void user_interface_task()
 		mode = POWER_MODE;
 		break;
 	case 'u':
-		Vi_ref += VI_STEP;
-		printk("Amplitude UP (%.1f V) \n", (double) Vi_ref);
+		Vi_ref_delta += VI_STEP;
+		printk("Amplitude delta UP (%.1f V) \n", (double) Vi_ref_delta);
 		break;
 	case 'j':
-		Vi_ref -= VI_STEP;
-		printk("Amplitude DOWN (%.1f V) \n", (double) Vi_ref);
+		Vi_ref_delta -= VI_STEP;
+		printk("Amplitude delta DOWN (%.1f V) \n", (double) Vi_ref_delta);
 		break;
 	case 'f':
 		v_freq += FREQ_INCREMENT;
@@ -210,8 +216,8 @@ void status_display_task()
 		printk("POW: ");
 	}
 	// Display duty cycle reference and frequency:
-	printk("a=%4.1fV ", (double) Vi_ref);
-	printk("@%.0f Hz ", (double) v_freq);
+	printk("a=%4.1fV (Δ=%3.1fV) ", (double) Vi_ref, (double) Vi_ref_delta);
+	printk("@%.0f Hz ", (double) v_freq_smooth);
 	printk("| ");
 	// Display measurements
 	printk("Vdc %5.2f V, ", (double) V_dc);
@@ -285,7 +291,7 @@ inline float32_t voltage_to_duty(float32_t Vleg, float32_t inverse_Vdc)
 inline void compute_duties()
 {
 	// Update inverter phase (∫ω(t).dt, computed with Euler approximation, modulo 2π)
-	float32_t omega = 2*PI*v_freq; // frequency conversion (Hz -> rad/s): ω = 2π.f
+	float32_t omega = 2*PI*v_freq_smooth; // frequency conversion (Hz -> rad/s): ω = 2π.f
 	v_angle = ot_modulo_2pi(v_angle + omega*T_control);
 
 	const float32_t V_DC_MIN = 10; // min DC voltage
@@ -296,7 +302,8 @@ inline void compute_duties()
 	else {
 		inv_V_dc_filt = 1.0F / V_dc_filt;
 	}
-	const float32_t duty_offset = 0.5;
+	// Update inverter amplitude using V/f control:
+	Vi_ref = KEMF*v_freq_smooth + Vi_ref_delta;
 	duty_a = voltage_to_duty(Vi_ref * ot_sin(v_angle), inv_V_dc_filt);
 	duty_b = voltage_to_duty(Vi_ref * ot_sin(v_angle - 2.0/3.0*PI), inv_V_dc_filt);
 	duty_c = voltage_to_duty(Vi_ref * ot_sin(v_angle - 4.0/3.0*PI), inv_V_dc_filt);
@@ -323,6 +330,8 @@ void control_task()
 {
 	/* Retrieve sensor values */
 	read_measurements();
+	// Smooth frequency reference
+	v_freq_smooth = freq_filter.calculateWithReturn(v_freq);
 
 	/* Compute sinusoidal duty cycles*/
 	compute_duties();
