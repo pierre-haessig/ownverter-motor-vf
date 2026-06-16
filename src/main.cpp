@@ -68,6 +68,8 @@ float32_t duty_increment = 0.05; // duty cycle amplitude up or down increment
 static bool power_enable = false; // Power conversion state of the leg (PWM activation state)
 static float32_t duty_a, duty_b, duty_c; // three-phase PWM duty cycle (phases a, b, c)
 
+const uint8_t PGPIO=41; // Pin used as GPIO (e.g. for external scope trigger, Pin 41=PB10)
+
 /* Possible modes for the OwnTech board */
 enum serial_interface_menu_mode
 {
@@ -110,6 +112,10 @@ void setup_routine()
 	shield.power.initBuck(ALL);
 	shield.power.setDutyCycleMin(ALL, 0.0);
 	shield.power.setDutyCycleMax(ALL, 1.0);
+
+	/* GPIO pin (e.g. for external scope trigger) */
+	spin.gpio.configurePin(PGPIO, OUTPUT);
+	spin.gpio.resetPin(PGPIO);
 
 	/* Setup all the measurements */
 	shield.sensors.enableDefaultOwnverterSensors();
@@ -285,6 +291,7 @@ void control_task()
 	if (mode == IDLE_MODE) {
 		if (power_enable == true) {
 			shield.power.stop(ALL);
+			spin.gpio.resetPin(PGPIO); // externally signal Power OFF
 		}
 		power_enable = false;
 	} else if (mode == POWER_MODE) {
@@ -296,6 +303,7 @@ void control_task()
 		if (!power_enable) {
 			power_enable = true;
 			shield.power.start(ALL);
+			spin.gpio.setPin(PGPIO); // externally signal Power ON
 		}
 	}
 }
