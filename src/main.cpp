@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2025 Pierre Haessig
+ * Copyright (c) 2026 Pierre Haessig
  *
  *   This program is free software: you can redistribute it and/or modify
  *   it under the terms of the GNU Lesser General Public License as published by
@@ -18,8 +18,8 @@
  */
 
 /**
- * @brief  Application for islanded inverter (open loop),
- *         with fixed, adjustable amplitude and frequency,
+ * @brief  Application for inverter driving a brushless motor,
+ *         with an open loop V/f control,
  *         using the three-phase OwnVerter board.
  *
  * @author Pierre Haessig <pierre.haessig@centralesupelec.fr>
@@ -58,13 +58,11 @@ static const float32_t T_control = 100e-6F; // Control task period (s)
 static const uint32_t T_control_micro = (uint32_t)(T_control * 1.e6F); // Control task period (integer number of µs)
 
 /* SINUSOIDAL SIGNAL GENERATION VARIABLES */
-static float32_t v_freq = 50.0; // inverter voltage frequency (Hz)
+static float32_t v_freq = 10.0; // inverter voltage frequency (Hz)
 static float32_t v_angle = 0.0; // inverter voltage angle (rad)
-const float32_t freq_increment = 10.0; // frequency up or down increment (Hz)
-static float32_t duty_offset = 0.50; // duty cycle offset. Should be close to 50% to offer maximal amplitude.
+const float32_t freq_increment = 5.0; // frequency up or down increment (Hz)
 static float32_t duty_amplitude = 0.0; // amplitude for sinusoidal duty cycle
 float32_t duty_increment = 0.05; // duty cycle amplitude up or down increment
-static bool square_wave = false; // whether to use square wave modulation, rather than PWM
 
 /* BOARD POWER CONVERSION STATE VARIABLES */
 static bool power_enable = false; // Power conversion state of the leg (PWM activation state)
@@ -147,9 +145,8 @@ void user_interface_task()
 				"|     ------- MENU ---------                   |\n"
 				"|     press i   : idle mode                    |\n"
 				"|     press p   : power mode                   |\n"
-				"|     press s   : toggle square wave mode      |\n"
-				"|     press u/o : duty cycle ampl./offset UP   |\n"
-				"|     press j/l : duty cycle ampl./offset DOWN |\n"
+				"|     press u   : duty cycle amplitude UP      |\n"
+				"|     press j   : duty cycle amplitude DOWN    |\n"
 				"|     press f   : frequency UP                 |\n"
 				"|     press v   : frequency DOWN               |\n"
 				"|______________________________________________|\n\n");
@@ -164,15 +161,6 @@ void user_interface_task()
 		printk("Power mode request\n");
 		mode = POWER_MODE;
 		break;
-	case 's':
-		if (square_wave) {
-			printk("Toggle PWM modulation\n");
-			square_wave = false;
-		} else {
-			printk("Togggle square wave modulation\n");
-			square_wave = true;
-		}
-		break;
 	case 'u':
 		duty_amplitude += duty_increment;
 		printk("Duty cycle amplitude UP (%.2f) \n", (double) duty_amplitude);
@@ -180,14 +168,6 @@ void user_interface_task()
 	case 'j':
 		duty_amplitude -= duty_increment;
 		printk("Duty cycle amplitude DOWN (%.2f) \n", (double) duty_amplitude);
-		break;
-	case 'o':
-		duty_offset += duty_increment;
-		printk("Duty cycle offset UP (%.2f) \n", (double) duty_offset);
-		break;
-	case 'l':
-		duty_offset -= duty_increment;
-		printk("Duty cycle offset DOWN (%.2f) \n", (double) duty_offset);
 		break;
 	case 'f':
 		v_freq += freq_increment;
@@ -205,7 +185,7 @@ void user_interface_task()
 /**
  * Board status display task, called pseudo-periodically.
  * It displays board measurements on the serial monitor
- * 
+ *
  * It also sets the board LED (blinking when POWER_MODE).
  */
 void status_display_task()
@@ -220,15 +200,8 @@ void status_display_task()
 		// Display state:
 		printk("POW: ");
 	}
-	// Display duty cycle references (if not square wave):
-	if (!square_wave) {
-		printk("duty a=%3.0f%% o=%3.0f%% ",
-		(double) (duty_amplitude*100),
-		(double) (duty_offset*100)
-	);
-	} else {
-		printk("square ");
-	}
+	// Display duty cycle reference and frequency:
+	printk("duty a=%3.0f%% (%4.1fV) ", (double) (duty_amplitude*100), (double) (duty_amplitude*V_high));
 	printk("@%.0f Hz ", (double) v_freq);
 	printk("| ");
 	// Display measurements
@@ -277,36 +250,24 @@ inline void read_measurements()
 	V_high_filt = vHigh_filter.calculateWithReturn(V_high);
 }
 
-/* Compute sinusoidal duty cycles for each phase a,b,c 
-
-CODE TO BE MODIFIED! -> DONE
-Instruction: implement three-phase sinusoidal duty cycles
+/* Compute sinusoidal duty cycles for each phase a,b,c
 */
 inline void compute_duties()
 {
 	// Update inverter phase (∫ω(t).dt, computed with Euler approximation, modulo 2π)
-	float32_t omega = 2*PI*v_freq; // frequency conversion (Hz -> rad/s): ω = 2π.f 
+	float32_t omega = 2*PI*v_freq; // frequency conversion (Hz -> rad/s): ω = 2π.f
 	v_angle = ot_modulo_2pi(v_angle + omega*T_control);
-	// Compute duty cycles: CODE TO BE MODIFIED!  -> DONE
+	// Compute duty cycles:
+	const float32_t duty_offset = 0.5;
 	duty_a = duty_offset + duty_amplitude * ot_sin(v_angle);
 	duty_b = duty_offset + duty_amplitude * ot_sin(v_angle - 2.0/3.0*PI);
 	duty_c = duty_offset + duty_amplitude * ot_sin(v_angle - 4.0/3.0*PI);
-
-	// Square wave inverter variant
-	if (square_wave) {
-		if (v_angle <= PI) duty_a = 1.0;
-		else duty_a = 0.0;
-		if (ot_modulo_2pi(v_angle - 2.0/3.0*PI) <= PI) duty_b = 1.0;
-		else duty_b = 0.0;
-		if (ot_modulo_2pi(v_angle - 4.0/3.0*PI) <= PI) duty_c = 1.0;
-		else duty_c = 0.0;
-	}
 }
 
 /**
  * This is the code loop of the critical task.
  * It is executed every T_control seconds (100 µs by default).
- * 
+ *
  * Actions:
  * - measure voltage and currents (in subfunction)
  * - compute duty cycle (in subfunction)
