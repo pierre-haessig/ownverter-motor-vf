@@ -61,16 +61,14 @@ static const uint32_t T_control_micro = (uint32_t)(T_control * 1.e6F); // Contro
 static float32_t v_freq = 50.0; // inverter voltage frequency (Hz)
 static float32_t v_angle = 0.0; // inverter voltage angle (rad)
 const float32_t freq_increment = 10.0; // frequency up or down increment (Hz)
-static float32_t duty_offset = 0.0; // duty cycle offset
+static float32_t duty_offset = 0.50; // duty cycle offset. Should be close to 50% to offer maximal amplitude.
 static float32_t duty_amplitude = 0.0; // amplitude for sinusoidal duty cycle
 float32_t duty_increment = 0.05; // duty cycle amplitude up or down increment
-
+static bool square_wave = false; // whether to use square wave modulation, rather than PWM
 
 /* BOARD POWER CONVERSION STATE VARIABLES */
-
 static bool power_enable = false; // Power conversion state of the leg (PWM activation state)
 static float32_t duty_a, duty_b, duty_c; // three-phase PWM duty cycle (phases a, b, c)
-
 
 /* Possible modes for the OwnTech board */
 enum serial_interface_menu_mode
@@ -149,6 +147,7 @@ void user_interface_task()
 				"|     ------- MENU ---------                   |\n"
 				"|     press i   : idle mode                    |\n"
 				"|     press p   : power mode                   |\n"
+				"|     press s   : toggle square wave mode      |\n"
 				"|     press u/o : duty cycle ampl./offset UP   |\n"
 				"|     press j/l : duty cycle ampl./offset DOWN |\n"
 				"|     press f   : frequency UP                 |\n"
@@ -164,6 +163,15 @@ void user_interface_task()
 	case 'p':
 		printk("Power mode request\n");
 		mode = POWER_MODE;
+		break;
+	case 's':
+		if (square_wave) {
+			printk("Toggle PWM modulation\n");
+			square_wave = false;
+		} else {
+			printk("Togggle square wave modulation\n");
+			square_wave = true;
+		}
 		break;
 	case 'u':
 		duty_amplitude += duty_increment;
@@ -212,13 +220,18 @@ void status_display_task()
 		// Display state:
 		printk("POW: ");
 	}
-	// Display measurements and duty cycle references:
-	printk("duty a=%3.0f%% o=%3.0f%% ",
+	// Display duty cycle references (if not square wave):
+	if (!square_wave) {
+		printk("duty a=%3.0f%% o=%3.0f%% ",
 		(double) (duty_amplitude*100),
 		(double) (duty_offset*100)
 	);
+	} else {
+		printk("square ");
+	}
 	printk("@%.0f Hz ", (double) v_freq);
 	printk("| ");
+	// Display measurements
 	printk("Vh %5.2f V, ", (double) V_high);
 	printk("Ih %4.2f A, ", (double) I_high);
 	printk("\n");
@@ -266,7 +279,7 @@ inline void read_measurements()
 
 /* Compute sinusoidal duty cycles for each phase a,b,c 
 
-CODE TO BE MODIFIED!
+CODE TO BE MODIFIED! -> DONE
 Instruction: implement three-phase sinusoidal duty cycles
 */
 inline void compute_duties()
@@ -274,11 +287,20 @@ inline void compute_duties()
 	// Update inverter phase (∫ω(t).dt, computed with Euler approximation, modulo 2π)
 	float32_t omega = 2*PI*v_freq; // frequency conversion (Hz -> rad/s): ω = 2π.f 
 	v_angle = ot_modulo_2pi(v_angle + omega*T_control);
-	
-	// Compute duty cycles: CODE TO BE MODIFIED!
-	duty_a = duty_offset + duty_amplitude;
-	duty_b = duty_offset + duty_amplitude;
-	duty_c = duty_offset + duty_amplitude;
+	// Compute duty cycles: CODE TO BE MODIFIED!  -> DONE
+	duty_a = duty_offset + duty_amplitude * ot_sin(v_angle);
+	duty_b = duty_offset + duty_amplitude * ot_sin(v_angle - 2.0/3.0*PI);
+	duty_c = duty_offset + duty_amplitude * ot_sin(v_angle - 4.0/3.0*PI);
+
+	// Square wave inverter variant
+	if (square_wave) {
+		if (v_angle <= PI) duty_a = 1.0;
+		else duty_a = 0.0;
+		if (ot_modulo_2pi(v_angle - 2.0/3.0*PI) <= PI) duty_b = 1.0;
+		else duty_b = 0.0;
+		if (ot_modulo_2pi(v_angle - 4.0/3.0*PI) <= PI) duty_c = 1.0;
+		else duty_c = 0.0;
+	}
 }
 
 /**
