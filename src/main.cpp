@@ -60,9 +60,9 @@ static const uint32_t T_control_micro = (uint32_t)(T_control * 1.e6F); // Contro
 /* SINUSOIDAL SIGNAL GENERATION VARIABLES */
 static float32_t v_freq = 10.0; // inverter voltage frequency (Hz)
 static float32_t v_angle = 0.0; // inverter voltage angle (rad)
-const float32_t freq_increment = 5.0; // frequency up or down increment (Hz)
-static float32_t duty_amplitude = 0.0; // amplitude for sinusoidal duty cycle
-float32_t duty_increment = 0.05; // duty cycle amplitude up or down increment
+const float32_t FREQ_INCREMENT = 10.0; // frequency up or down increment (Hz)
+float32_t Vi_ref = 0.0; // Inverter voltage reference (V)
+const float32_t VI_STEP = 0.5; // Inverter voltage increment/decrement step (V)
 
 /* BOARD POWER CONVERSION STATE VARIABLES */
 static bool power_enable = false; // Power conversion state of the leg (PWM activation state)
@@ -85,16 +85,19 @@ uint8_t received_serial_char; // Temporary storage for serial monitor character 
 
 /* Measurement variables */
 
-static float32_t V_high; // High-side voltage (DC bus)
-static float32_t I_high; // High-side current (DC bus current to the legs)
+// DC side variables
+static float32_t V_dc; // DC bus voltage (V)
+static float32_t I_dc; // Current drawn from the DC bus (A)
+
 // static float32_t Va, Vb, Vc; // AC-side phase voltages
 static float32_t Ia, Ib, Ic; // AC-side phase currents
 
 static float meas_data; // Temporary storage for measured value
 
-/* V_high filter (5ms lowpass)*/
-static LowPassFirstOrderFilter vHigh_filter = controlLibFactory.lowpassfilter(T_control, 5.0e-3F);
-static float32_t V_high_filt; // High-side voltage (DC bus), smoothed by lowpass filter
+// Vdc lowpass filter (5 ms time constant)
+static LowPassFirstOrderFilter vdc_filter = controlLibFactory.lowpassfilter(T_control, 5.0e-3F);
+static float32_t V_dc_filt; // DC bus voltage, lowpass filtered (V)
+static float32_t inv_V_dc_filt; // 1/Vdc, with a 1/V_DC_MIN bound
 
 
 /* -------------- SETUP FUNCTION -------------------------------*/
@@ -151,8 +154,8 @@ void user_interface_task()
 				"|     ------- MENU ---------                   |\n"
 				"|     press i   : idle mode                    |\n"
 				"|     press p   : power mode                   |\n"
-				"|     press u   : duty cycle amplitude UP      |\n"
-				"|     press j   : duty cycle amplitude DOWN    |\n"
+				"|     press u   : voltage amplitude UP         |\n"
+				"|     press j   : voltage amplitude DOWN       |\n"
 				"|     press f   : frequency UP                 |\n"
 				"|     press v   : frequency DOWN               |\n"
 				"|______________________________________________|\n\n");
@@ -168,19 +171,19 @@ void user_interface_task()
 		mode = POWER_MODE;
 		break;
 	case 'u':
-		duty_amplitude += duty_increment;
-		printk("Duty cycle amplitude UP (%.2f) \n", (double) duty_amplitude);
+		Vi_ref += VI_STEP;
+		printk("Amplitude UP (%.1f V) \n", (double) Vi_ref);
 		break;
 	case 'j':
-		duty_amplitude -= duty_increment;
-		printk("Duty cycle amplitude DOWN (%.2f) \n", (double) duty_amplitude);
+		Vi_ref -= VI_STEP;
+		printk("Amplitude DOWN (%.1f V) \n", (double) Vi_ref);
 		break;
 	case 'f':
-		v_freq += freq_increment;
+		v_freq += FREQ_INCREMENT;
 		printk("Frequency UP (%.2f Hz) \n", (double) v_freq);
 		break;
 	case 'v':
-		v_freq -= freq_increment;
+		v_freq -= FREQ_INCREMENT;
 		printk("Frequency DOWN (%.2f Hz) \n", (double) v_freq);
 		break;
 	default:
@@ -207,12 +210,12 @@ void status_display_task()
 		printk("POW: ");
 	}
 	// Display duty cycle reference and frequency:
-	printk("duty a=%3.0f%% (%4.1fV) ", (double) (duty_amplitude*100), (double) (duty_amplitude*V_high));
+	printk("a=%4.1fV ", (double) Vi_ref);
 	printk("@%.0f Hz ", (double) v_freq);
 	printk("| ");
 	// Display measurements
-	printk("Vh %5.2f V, ", (double) V_high);
-	printk("Ih %4.2f A, ", (double) I_high);
+	printk("Vdc %5.2f V, ", (double) V_dc);
+	printk("Idc %4.2f A, ", (double) I_dc);
 	printk("\n");
 	task.suspendBackgroundMs(200);
 }
@@ -221,7 +224,7 @@ void status_display_task()
    through microcontroller ADCs (Analog to Digital Converters).
 
    Measured signals:
-   - currents: Ia, Ib, Ic, I_high
+   - currents: Ia, Ib, Ic, I_dc
    - voltages: V_high (with smoothed lowpass filtered version)
  */
 inline void read_measurements()
@@ -243,31 +246,68 @@ inline void read_measurements()
 
 	meas_data = shield.sensors.getLatestValue(I_HIGH);
 	if (meas_data != NO_VALUE) {
-		I_high = meas_data;
+		I_dc = meas_data;
 	}
 
 	meas_data = shield.sensors.getLatestValue(V_HIGH);
 	if (meas_data != NO_VALUE) {
-		V_high = meas_data;
+		V_dc = meas_data;
 	}
 
 	/* Apply filters */
 	// Smooth V_high (lowpass)
-	V_high_filt = vHigh_filter.calculateWithReturn(V_high);
+	V_dc_filt = vdc_filter.calculateWithReturn(V_dc);
 }
 
-/* Compute sinusoidal duty cycles for each phase a,b,c
+/* Convert inverter leg voltage to duty cycle, including saturation
+
+Leg voltage in the [-Vdc/2, +Vdc/2] interval is mapped to [0,1],
+meaning that the duty cycle offset is added automatically.
 */
+inline float32_t voltage_to_duty(float32_t Vleg, float32_t inverse_Vdc)
+{
+	static float32_t duty_raw;
+	const float32_t duty_offset = 0.50F;
+	duty_raw = Vleg * inverse_Vdc + duty_offset;
+	if (duty_raw > 1.0F) {
+		return 1.0F;
+	}
+	else if (duty_raw < 0.0F) {
+		return 0.0F;
+	}
+	else {
+		return duty_raw;
+	}
+	// TODO: raise flag if duty saturation.
+}
+
+/* Compute sinusoidal duty cycles duty_abc from Vi_ref and V_high_filtered */
 inline void compute_duties()
 {
 	// Update inverter phase (∫ω(t).dt, computed with Euler approximation, modulo 2π)
 	float32_t omega = 2*PI*v_freq; // frequency conversion (Hz -> rad/s): ω = 2π.f
 	v_angle = ot_modulo_2pi(v_angle + omega*T_control);
-	// Compute duty cycles:
+
+	const float32_t V_DC_MIN = 10; // min DC voltage
+	// Invert Vdc with a bound
+	if (V_dc_filt > V_DC_MIN ) {
+		inv_V_dc_filt = 1.0F / V_dc_filt;
+	}
+	else {
+		inv_V_dc_filt = 1.0F / V_dc_filt;
+	}
 	const float32_t duty_offset = 0.5;
-	duty_a = duty_offset + duty_amplitude * ot_sin(v_angle);
-	duty_b = duty_offset + duty_amplitude * ot_sin(v_angle - 2.0/3.0*PI);
-	duty_c = duty_offset + duty_amplitude * ot_sin(v_angle - 4.0/3.0*PI);
+	duty_a = voltage_to_duty(Vi_ref * ot_sin(v_angle), inv_V_dc_filt);
+	duty_b = voltage_to_duty(Vi_ref * ot_sin(v_angle - 2.0/3.0*PI), inv_V_dc_filt);
+	duty_c = voltage_to_duty(Vi_ref * ot_sin(v_angle - 4.0/3.0*PI), inv_V_dc_filt);
+}
+
+/* Apply legs duty cycles to the PWM generators */
+inline void apply_duties()
+{
+	shield.power.setDutyCycle(LEG1, duty_a);
+	shield.power.setDutyCycle(LEG2, duty_b);
+	shield.power.setDutyCycle(LEG3, duty_c);
 }
 
 /**
@@ -296,9 +336,7 @@ void control_task()
 		power_enable = false;
 	} else if (mode == POWER_MODE) {
 		/* Set duty cycles of all three legs */
-		shield.power.setDutyCycle(LEG1, duty_a);
-		shield.power.setDutyCycle(LEG2, duty_b);
-		shield.power.setDutyCycle(LEG3, duty_c);
+		apply_duties();
 		/* Set POWER ON */
 		if (!power_enable) {
 			power_enable = true;
