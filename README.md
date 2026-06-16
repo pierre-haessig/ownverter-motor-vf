@@ -1,6 +1,11 @@
-# OwnVerter application: Vf motor control inverter
+# OwnVerter application: V/f motor control inverter
 
 This repository host embedded microcontroller code for using the [OwnTech OwnVerter](https://www.owntech.io/ownverter/) board as an **motor drive**.
+The inverter is driven as a voltage source:
+- open loop (no position sensor feedback)
+- with V/f control, i..e voltage amplitude proportional to frequency
+
+   - with the option to adjust a small voltage delta.
 
 This code is used in the context of an electric machines course at CentralSupélec, Rennes campus.
 
