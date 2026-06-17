@@ -51,6 +51,8 @@ void control_task();
 void compute_duties();
 /* Read analog measurements (subroutine of control task)*/
 void read_measurements();
+/* Read motor's position sensors (Hall effect) */
+void read_motor_position();
 
 /* -------------- VARIABLES DECLARATIONS------------------- */
 
@@ -105,6 +107,17 @@ static float32_t inv_V_dc_filt; // 1/Vdc, with a 1/V_DC_MIN bound
 static LowPassFirstOrderFilter freq_filter = controlLibFactory.lowpassfilter(T_control, 0.10F);
 static float32_t v_freq_smooth = v_freq; // inverter voltage frequency, smoothed (low pass) (Hz)
 
+// Motor position (Hall effect sensor)
+#define HALL1 PC6 // Hall sensor 1 pin
+#define HALL2 PC7 // Hall sensor 2 pin
+#define HALL3 PD2 // Hall sensor 3 pin
+static uint8_t Hall1_value; // Hall sensor 1 value
+static uint8_t Hall2_value; // Hall sensor 2 value
+static uint8_t Hall3_value; // Hall sensor 3 value
+static uint8_t motor_angle_index; // Hall sensors index value (bitwise concatenation H1*2^0 + H2*2^1 + H3*2^2)
+const int8_t HALL_SECTOR[] = {-1, 5, 1, 0, 3, 4, 2, -1}; // index to sector conversion look-up-table (1st and last value illegal)
+static int8_t motor_angle_sector = HALL_SECTOR[motor_angle_index]; // motor angle, expressed as a 60° sector in 0,...,5
+const char* SECTOR_STRING[] = {"→","↗","↖","←","↙","↘"};
 
 /* -------------- SETUP FUNCTION -------------------------------*/
 
@@ -128,6 +141,10 @@ void setup_routine()
 
 	/* Setup all the measurements */
 	shield.sensors.enableDefaultOwnverterSensors();
+	// Hall effect sensors
+	spin.gpio.configurePin(HALL1, INPUT);
+	spin.gpio.configurePin(HALL2, INPUT);
+	spin.gpio.configurePin(HALL3, INPUT);
 
 	/* Declare tasks */
 	uint32_t app_task_number = task.createBackground(status_display_task);
@@ -222,6 +239,8 @@ void status_display_task()
 	// Display measurements
 	printk("Vdc %5.2f V, ", (double) V_dc);
 	printk("Idc %4.2f A, ", (double) I_dc);
+	printk("| ");
+	printk("M∠ i%d, s%d %s", motor_angle_index, motor_angle_sector, SECTOR_STRING[motor_angle_sector]);
 	printk("\n");
 	task.suspendBackgroundMs(200);
 }
@@ -264,6 +283,23 @@ inline void read_measurements()
 	// Smooth V_high (lowpass)
 	V_dc_filt = vdc_filter.calculateWithReturn(V_dc);
 }
+
+/* Read motor's position sensors
+
+Measure the rotor position within 60° sectors  (Hall effect sensors)
+*/
+inline void read_motor_position()
+{
+	/* Individual Hall sensors */
+	Hall1_value = spin.gpio.readPin(HALL1);
+	Hall2_value = spin.gpio.readPin(HALL2);
+	Hall3_value = spin.gpio.readPin(HALL3);
+	/* Angle index (bitwise concatenation) */
+	motor_angle_index = Hall1_value * 1 + Hall2_value * 2 + Hall3_value * 4;
+	/* Index to sector conversion */
+	motor_angle_sector = HALL_SECTOR[motor_angle_index];
+}
+
 
 /* Convert inverter leg voltage to duty cycle, including saturation
 
@@ -330,6 +366,7 @@ void control_task()
 {
 	/* Retrieve sensor values */
 	read_measurements();
+	read_motor_position();
 	// Smooth frequency reference
 	v_freq_smooth = freq_filter.calculateWithReturn(v_freq);
 
